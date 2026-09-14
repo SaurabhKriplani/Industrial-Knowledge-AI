@@ -1,0 +1,113 @@
+import chromadb
+from backend.config import CHROMA_PATH, COLLECTION_NAME
+from backend.models.embedding import ChunkEmbedding
+import uuid
+from collections import defaultdict
+#from pprint import pprint
+
+class ChromaStore:
+    def __init__(self):
+        self.client = chromadb.PersistentClient(path=CHROMA_PATH)
+        self.collection = self.client.get_or_create_collection(COLLECTION_NAME)
+
+    def add_embeddings(self, chunk_embeddings : list[ChunkEmbedding]) -> list[str]:
+        documents = [
+            ce.chunk.text for ce in chunk_embeddings # ce -> ChunkEmbedding
+        ]
+
+        embedding_vectors = [
+            ce.embedding for ce in chunk_embeddings
+        ]
+
+        metadatas = [
+            {
+                "document_id": ce.document_id,
+                "file_name": ce.file_name,
+                "file_path": ce.file_path,
+                "document_type": ce.document_type,
+                "chunk_id": ce.chunk.chunk_id,
+                "start_char": ce.chunk.start_char,
+                "end_char": ce.chunk.end_char,
+                "char_count": ce.chunk.char_count,
+                "word_count": ce.chunk.word_count,
+            }
+            for ce in chunk_embeddings
+        ]
+
+        ids = [
+                str(uuid.uuid4())+ '_' + str(ce.chunk.chunk_id)
+                for ce in chunk_embeddings
+              ]
+
+        self.collection.add(
+            ids = ids,
+            documents = documents,
+            embeddings = embedding_vectors,
+            metadatas = metadatas
+        )
+
+        return ids
+
+    def reset_database(self):
+        try:
+           self.client.delete_collection(COLLECTION_NAME)
+        except Exception:
+            pass
+        self.collection = self.client.get_or_create_collection(COLLECTION_NAME)
+
+    def similarity_search(self,query_embedding : list[float], top_k: int = 4):
+
+        results = self.collection.query(query_embeddings = [query_embedding],
+                                        n_results = top_k,
+                                        include = ["documents",
+                                                 "metadatas",
+                                                 "distances"])
+        #pprint(results)
+        return results
+
+    def list_documents(self):
+        results = self.collection.get(include=["metadatas"])
+
+        grouped_documents = defaultdict(
+            lambda: {
+                "document_id": "",
+                "file_name": "",
+                "document_type": "",
+                "total_chunks": 0,
+            }
+        )
+
+        for metadata in results["metadatas"]:
+            document = grouped_documents[metadata["document_id"]]
+            document["document_id"] = metadata["document_id"]
+            document["file_name"] = metadata["file_name"]
+            document["document_type"] = metadata["document_type"]
+            document["total_chunks"] += 1
+
+        documents = sorted(
+            grouped_documents.values(),
+            key=lambda doc: doc["file_name"].lower()
+        )
+
+        return {
+            "total_documents": len(documents),
+            "total_chunks": len(results["metadatas"]),
+            "documents": documents
+        }
+
+    def get_file_path(self, document_id: str) -> str:
+        results = self.collection.get(
+            where={"document_id": document_id},
+            include=["metadatas"]
+        )
+
+        if not results["metadatas"]:
+            raise ValueError("Document not found")
+
+        return results["metadatas"][0]["file_path"]
+
+    def delete_document(self, document_id: str):
+        self.collection.delete(
+            where={"document_id": document_id}
+        )
+
